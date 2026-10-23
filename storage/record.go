@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 )
 
 // [ crc:4 ][ timestamp:8 ][ type:1 ][ keyLen:4 ][ valLen:4 ][ key ][ value ]
@@ -140,4 +141,146 @@ func encodeRecord(rec record) ([]byte, error) {
 	)
 
 	return encoded, nil
+}
+
+// decodeRecord rebuilds the in-memory keyDir by reconstructing the records from bytes
+func decodeRecord(r io.Reader, remaining int64) (record, error) {
+
+	//check how many bytes remain
+	if remaining < 0 {
+		return record{}, fmt.Errorf(
+			"negative remaining byte count : %d",
+			remaining,
+		)
+	}
+
+	if remaining == 0 {
+		return record{}, io.EOF
+	}
+
+	if remaining < int64(recordHeaderSize) {
+		return record{}, fmt.Errorf(
+			"%w : header has %d bytes; need %d",
+			ErrTruncated,
+			remaining,
+			recordHeaderSize,
+		)
+	}
+
+	//read the fixed size header
+	var header [recordHeaderSize]byte
+
+	if _, err := io.ReadFull(r, header[:]); err != nil {
+		if errors.Is(err, io.EOF) ||
+			errors.Is(err, io.ErrUnexpectedEOF) {
+			return record{}, fmt.Errorf(
+				"%w: reading header: %v",
+				ErrTruncated,
+				err,
+			)
+		}
+		return record{}, fmt.Errorf("read record header: %w", err)
+	}
+
+	//extract the checksum
+	storedChecksum := binary.BigEndian.Uint32(
+		header[:checksumSize],
+	)
+
+	//extract the timestamp, type and lengths
+	timestampStart := checksumSize
+	timestampEnd := timestampStart + timestampSize
+
+	timestamp := binary.BigEndian.Uint64(
+		header[timestampStart:timestampEnd],
+	)
+
+	typeOffset := timestampEnd
+	typ := recordType(header[typeOffset])
+
+	keyLenOffset := typeOffset + recordTypeSize
+	valueLenOffset := keyLenOffset + keyLengthSize
+
+	keyLen := uint64(binary.BigEndian.Uint32(
+		header[keyLenOffset : keyLenOffset+keyLengthSize],
+	))
+
+	valueLen := uint64(binary.BigEndian.Uint32(
+		header[valueLenOffset : valueLenOffset+valueLengthSize],
+	))
+
+	//validate the metadata
+	if err := validateRecordMetadata(
+		typ,
+		keyLen,
+		valueLen,
+	); err != nil {
+		return record{}, fmt.Errorf(
+			"%w: invalid metadata: %v",
+			ErrCorrupt,
+			err,
+		)
+	}
+
+	//check that the complete record fits
+	encodedLen := int64(recordHeaderSize) + int64(keyLen) + int64(valueLen)
+
+	if encodedLen > remaining {
+		return record{}, fmt.Errorf(
+			"%w: record requires %d bytes; only %d remain",
+			ErrTruncated,
+			encodedLen,
+			remaining,
+		)
+	}
+
+	//allocate a payload buffer and reconstruct the payload
+	payloadLen := recordMetadataSize + int(keyLen) + int(valueLen)
+
+	payload := make([]byte, payloadLen)
+
+	copy(payload, header[checksumSize:])
+
+	//read the remaining bytes
+	if _, err := io.ReadFull(
+		r,
+		payload[recordMetadataSize:],
+	); err != nil {
+		if errors.Is(err, io.EOF) ||
+			errors.Is(err, io.ErrUnexpectedEOF) {
+			return record{}, fmt.Errorf(
+				"%w: reading payload: %v",
+				ErrTruncated,
+				err,
+			)
+		}
+		return record{}, fmt.Errorf("read record payload: %w", err)
+	}
+
+	//verify the checksum
+	actualChecksum := crc32.Checksum(payload, crcTable)
+
+	if actualChecksum != storedChecksum {
+		return record{}, fmt.Errorf(
+			"%w: checksum mismatch: stored %08x, calculated %08x",
+			ErrCorrupt,
+			storedChecksum,
+			actualChecksum,
+		)
+	}
+
+	//extract the key and value
+	keyStart := recordMetadataSize
+	keyEnd := keyStart + int(keyLen)
+	valueEnd := keyEnd + int(valueLen)
+
+	rec := record{
+		timestamp: timestamp,
+		typ:       typ,
+
+		key:   payload[keyStart:keyEnd:keyEnd],
+		value: payload[keyEnd:valueEnd:valueEnd],
+	}
+
+	return rec, nil
 }

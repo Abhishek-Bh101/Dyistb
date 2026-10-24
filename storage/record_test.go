@@ -96,3 +96,49 @@ func TestRecordRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+// TestEncodeRejectsInvalidRecords checks whether the db refuses to encode records that violates the storage format's rules or not
+func TestEncodeRejectsInvalidRecords(t *testing.T) {
+	tests := []struct {
+		name string
+		rec  record
+	}{
+		{
+			name: "unknown type",
+			rec: record{
+				typ: 99,
+				key: []byte("k"),
+			},
+		},
+		{
+			name: "empty key",
+			rec: record{
+				typ:   recordTypePut,
+				value: []byte("v"),
+			},
+		},
+		{
+			name: "delete with value",
+			rec: record{
+				typ:   recordTypeDelete,
+				key:   []byte("k"),
+				value: []byte("v"),
+			},
+		},
+		{
+			name: "oversized key",
+			rec: record{
+				typ: recordTypePut,
+				key: bytes.Repeat([]byte("k"), maxKeySize+1),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := encodeRecord(tt.rec); err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+		})
+	}
+}

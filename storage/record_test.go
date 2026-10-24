@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"io"
 	"testing"
 )
 
@@ -252,5 +254,24 @@ func TestDecodeRejectsOversizedKeyLength(t *testing.T) {
 
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("expected ErrCorrupt, got %v", err)
+	}
+}
+
+func TestDecodeReturnsEOFAtRecordBoundary(t *testing.T) {
+	_, err := decodeRecord(bytes.NewReader(nil), 0)
+
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("expected io.EOF, got %v", err)
+	}
+}
+
+func TestChecksumUsesCastagnoli(t *testing.T) {
+	payload := []byte("DyistDb")
+
+	got := crc32.Checksum(payload, crcTable)
+	want := crc32.Checksum(payload, crc32.MakeTable(crc32.Castagnoli))
+
+	if got != want {
+		t.Errorf("checksum = %08x, want %08x", got, want)
 	}
 }

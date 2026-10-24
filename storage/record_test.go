@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -140,5 +141,25 @@ func TestEncodeRejectsInvalidRecords(t *testing.T) {
 				t.Fatal("expected an error, got nil")
 			}
 		})
+	}
+}
+
+func TestDecodeRejectsCorruptedChecksum(t *testing.T) {
+	encoded, err := encodeRecord(record{
+		timestamp: 1_800_000_000_123,
+		typ:       recordTypePut,
+		key:       []byte("key"),
+		value:     []byte("value"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	encoded[len(encoded)-1] ^= 0xff
+
+	_, err = decodeRecord(bytes.NewReader(encoded), int64(len(encoded)))
+
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("expected Errcorrupt, got %v", err)
 	}
 }

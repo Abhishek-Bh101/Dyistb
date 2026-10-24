@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"testing"
@@ -203,5 +204,53 @@ func TestDecodeRejectsTruncatedPayload(t *testing.T) {
 
 	if !errors.Is(err, ErrTruncated) {
 		t.Fatalf("expected ErrTruncated, got %v", err)
+	}
+}
+
+func TestDecodeReaderEndsEarly(t *testing.T) {
+	encoded, err := encodeRecord(record{
+		timestamp: 1_800_000_000_123,
+		typ:       recordTypePut,
+		key:       []byte("key"),
+		value:     []byte("some value"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The reader ends early even though the caller reports the original
+	// record length. This exercises the io.ReadFull error path.
+	truncated := encoded[:len(encoded)-1]
+
+	_, err = decodeRecord(
+		bytes.NewReader(truncated),
+		int64(len(encoded)),
+	)
+
+	if !errors.Is(err, ErrTruncated) {
+		t.Fatalf("expected ErrTruncated, got %v", err)
+	}
+}
+
+func TestDecodeRejectsOversizedKeyLength(t *testing.T) {
+	var header [recordHeaderSize]byte
+
+	typeOffset := checksumSize + timestampSize
+	header[typeOffset] = byte(recordTypePut)
+
+	keyLengthOffset := typeOffset + recordTypeSize
+
+	binary.BigEndian.PutUint32(
+		header[keyLengthOffset:keyLengthOffset+keyLengthSize],
+		uint32(maxKeySize+1),
+	)
+
+	_, err := decodeRecord(
+		bytes.NewReader(header[:]),
+		int64(len(header)),
+	)
+
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("expected ErrCorrupt, got %v", err)
 	}
 }

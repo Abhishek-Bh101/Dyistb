@@ -181,3 +181,27 @@ func TestDecodeRejectsTruncatedHeader(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeRejectsTruncatedPayload(t *testing.T) {
+	encoded, err := encodeRecord(record{
+		timestamp: 1_800_000_000_123,
+		typ:       recordTypePut,
+		key:       []byte("key"),
+		value:     []byte("some value"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a file ending one byte before the record is complete.
+	truncated := encoded[:len(encoded)-1]
+
+	_, err = decodeRecord(
+		bytes.NewReader(truncated),
+		int64(len(truncated)),
+	)
+
+	if !errors.Is(err, ErrTruncated) {
+		t.Fatalf("expected ErrTruncated, got %v", err)
+	}
+}

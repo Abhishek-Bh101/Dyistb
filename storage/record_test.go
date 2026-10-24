@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -161,5 +162,22 @@ func TestDecodeRejectsCorruptedChecksum(t *testing.T) {
 
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("expected Errcorrupt, got %v", err)
+	}
+}
+
+func TestDecodeRejectsTruncatedHeader(t *testing.T) {
+	for n := 1; n < recordHeaderSize; n++ {
+		t.Run(fmt.Sprintf("%d_bytes", n), func(t *testing.T) {
+			input := bytes.Repeat([]byte{0}, n)
+
+			_, err := decodeRecord(
+				bytes.NewReader(input),
+				int64(len(input)),
+			)
+
+			if !errors.Is(err, ErrTruncated) {
+				t.Fatalf("expected ErrTruncated, got %v", err)
+			}
+		})
 	}
 }

@@ -155,3 +155,65 @@ Reading only a value by offset does not independently verify the checksum coveri
 ### File format versioning
 
 A file-level magic number and format version are planned for the log-file implementation. These are separate from the 21-byte record header and will be specified when implemented.
+
+## 9. Initial single-file engine
+
+### File layout
+
+The initial storage engine uses one append-only log file named `data.log` inside the database directory.
+
+The engine does not overwrite old records in place. PUT and DELETE operations append new records to the log.
+
+### Opening the database
+
+`Open(dir)` creates the database directory if necessary and opens or creates `data.log` without truncating it.
+
+For the initial implementation, opening a non-empty log returns `ErrRecoveryRequired`. The engine must not initialise an empty key directory and treat existing records as absent.
+
+Session 5 will replace this restriction with log recovery.
+
+Only one process may open a database directory at a time. The implementation uses an operating-system file lock to enforce this restriction on supported Unix systems.
+
+### In-memory key directory
+
+The key directory maps each live key to metadata describing its latest record.
+
+Each index entry contains:
+
+- Record start offset.
+- Encoded record size.
+- Timestamp.
+
+The key is represented as a Go string containing the original key bytes. Keys and values remain opaque byte sequences.
+
+The key directory is in memory and is not yet persisted. It will be rebuilt from the log during recovery.
+
+### Write semantics
+
+A successful PUT or DELETE must append a complete record and successfully sync the log file using `File.Sync()` before publishing the corresponding key-directory change.
+
+The write offset advances only after a successful write and sync.
+
+If a write or sync fails, the database enters a failed state and rejects further writes until it is closed and reopened safely.
+
+### Read semantics
+
+`Get` uses the key directory to locate the latest record, reads that record, and verifies its encoding and checksum before returning the value.
+
+A missing or deleted key returns a not-found error.
+
+### Delete semantics
+
+DELETE appends a physical DELETE record with an empty value.
+
+Deleting a key that is already absent is idempotent and returns no error. The deletion record is still appended.
+
+### Concurrency and lifecycle
+
+A `sync.RWMutex` protects shared in-process state.
+
+- `Get` uses a read lock.
+- `Put`, `Delete`, and `Close` use an exclusive lock.
+- Operations attempted after closure return `ErrClosed`.
+
+The initial engine supports a single process and does not yet implement file rotation, merge/compaction, hint files or crash recovery.

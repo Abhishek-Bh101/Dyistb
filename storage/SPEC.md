@@ -65,3 +65,93 @@ Rebuild the keydir when opening the database.
 - Compaction is synchronous initially; normal operations
   may be paused while a merge runs.
 
+## 8. Record format and codec
+
+### Record layout
+
+Each record consists of a fixed-size header followed by a variable-length key and value.
+
+```text
+[ CRC-32C: 4 bytes ]
+[ Timestamp: 8 bytes ]
+[ Record type: 1 byte ]
+[ Key length: 4 bytes ]
+[ Value length: 4 bytes ]
+[ Key bytes ]
+[ Value bytes ]
+```
+
+The fixed header is 21 bytes, including the checksum. The metadata following the checksum occupies 17 bytes.
+
+The total encoded record size is:
+
+`record_size = 21 + key_length + value_length`
+
+All integer fields use big-endian byte order. Lengths are measured in bytes.
+
+### Record types
+
+- PUT: type value `1`. Stores a key-value pair. Empty values are permitted.
+- DELETE: type value `2`. Represents a deletion and must have an empty value.
+
+Keys must not be empty. Unknown record types are invalid.
+
+A physical DELETE record is distinct from a distributed logical tombstone, which must preserve version information for conflict resolution in the distributed layer.
+
+### Timestamp
+
+Each record contains an unsigned 64-bit timestamp representing Unix time in milliseconds.
+
+The codec stores and retrieves the supplied timestamp but does not generate it. Storage operations will assign timestamps when creating records. Compaction must preserve the timestamps of retained records.
+
+Wall-clock timestamps alone are not sufficient to establish causality between concurrent distributed writes.
+
+### Size limits
+
+- Maximum key size: 1 MiB (1,048,576 bytes).
+- Maximum value size: 64 MiB (67,108,864 bytes).
+
+The encoder and decoder must enforce these limits. The decoder must validate the record type and declared lengths before allocating memory based on those lengths.
+
+The decoder must also check that the complete record fits within the number of bytes remaining in the source.
+
+### Checksum
+
+The checksum uses CRC-32C (Castagnoli) and occupies the first four bytes of the record.
+
+It covers every byte after the checksum field, including the timestamp, record type, lengths, key and value. The checksum field itself is excluded.
+
+A checksum mismatch indicates corruption. CRC-32C detects accidental corruption but is not a cryptographic integrity mechanism.
+
+### Codec behaviour and errors
+
+- `encodeRecord` converts a valid logical record into its binary representation.
+- `decodeRecord` reads and validates exactly one record from an `io.Reader`.
+- The codec does not perform file writes, sync data to disk, maintain the keydir or implement recovery.
+
+The decoder distinguishes the following outcomes:
+
+- `io.EOF`: No bytes remain at the expected record boundary.
+- `ErrTruncated`: The record is incomplete or its declared size exceeds the reported remaining bytes.
+- `ErrCorrupt`: The record metadata is invalid or the checksum does not match.
+- Other I/O errors: The underlying reader encountered another error.
+
+Callers can use `errors.Is` to check for the sentinel errors.
+
+During recovery, an incomplete trailing record may be truncated to the last valid record boundary according to the recovery policy. A checksum failure in a complete record must be reported as corruption rather than silently discarded.
+
+An invalid length near the end of a file can resemble an interrupted write. Error classification alone cannot always establish the cause, so recovery must consider the record's position and available evidence.
+
+### Record locations
+
+The codec can calculate the encoded size of a record. The storage engine will track file IDs and record offsets in the keydir.
+
+The value offset is:
+
+`value_offset = record_offset + 21 + key_length`
+
+Reading only a value by offset does not independently verify the checksum covering the entire record.
+
+### File format versioning
+
+A file-level magic number and format version are planned for the log-file implementation. These are separate from the 21-byte record header and will be specified when implemented.

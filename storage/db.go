@@ -76,12 +76,14 @@ func Open(dir string) (*DB, error) {
 		return nil, fmt.Errorf("lock database log : %w", err)
 	}
 
+	// file.Stat() returns info about the file(like its metadata)
 	info, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
 		return nil, fmt.Errorf("stat database log: %w", err)
 	}
 
+	//check whether the log contains data, if yes, reject it(recovery is not implemented yet)
 	if info.Size() != 0 {
 		_ = file.Close()
 		return nil, fmt.Errorf(
@@ -101,4 +103,38 @@ func Open(dir string) (*DB, error) {
 
 	return db, nil
 
+}
+
+// Close syncs and closes the database log
+func (db *DB) Close() error {
+
+	// mutex ensures only one goroutine can hold the lock
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if db.closed {
+		return ErrClosed
+	}
+
+	db.closed = true
+
+	syncErr := db.logFile.Sync() //sync file's contents to stable storage
+
+	unlockErr := syscall.Flock(int(db.logFile.Fd()), syscall.LOCK_UN) //release the os level file lock
+
+	closeErr := db.logFile.Close() //close the file
+
+	if syncErr != nil {
+		return fmt.Errorf("sync database log on close : %w", syncErr)
+	}
+
+	if unlockErr != nil {
+		return fmt.Errorf("unlock database log : %w", unlockErr)
+	}
+
+	if closeErr != nil {
+		return fmt.Errorf("close database log : %w", closeErr)
+	}
+
+	return nil
 }

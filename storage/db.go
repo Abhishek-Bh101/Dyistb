@@ -3,6 +3,7 @@ package storage
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -135,6 +136,61 @@ func (db *DB) Close() error {
 	if closeErr != nil {
 		return fmt.Errorf("close database log : %w", closeErr)
 	}
+
+	return nil
+}
+
+func (db *DB) Put(key, value []byte) error {
+
+	db.mu.Lock()
+
+	defer db.mu.Unlock()
+
+	if db.closed {
+		return ErrClosed
+	}
+
+	if db.failed != nil {
+		return fmt.Errorf("database is in failed state : %w", db.failed)
+	}
+
+	rec := record{
+		timestamp: uint64(db.now().UnixMilli()),
+		typ:       recordTypePut,
+		key:       key,
+		value:     value,
+	}
+
+	encoded, err := encodeRecord(rec)
+	if err != nil {
+		return fmt.Errorf("encode put record : %w", err)
+	}
+
+	offset := db.writeOffset
+
+	n, err := db.logFile.WriteAt(encoded, offset)
+
+	if err == nil && n != len(encoded) {
+		err = io.ErrShortWrite
+	}
+
+	if err != nil {
+		db.failed = fmt.Errorf("append put record: %w", err)
+		return db.failed
+	}
+
+	if err := db.logFile.Sync(); err != nil {
+		db.failed = fmt.Errorf("sync put record: %w", err)
+		return db.failed
+	}
+
+	db.keydir[string(key)] = indexEntry{
+		recordOffset: offset,
+		recordSize:   int64(len(encoded)),
+		timestamp:    rec.timestamp,
+	}
+
+	db.writeOffset += int64(len(encoded))
 
 	return nil
 }

@@ -87,21 +87,18 @@ func Open(dir string) (*DB, error) {
 		return nil, fmt.Errorf("stat database log: %w", err)
 	}
 
-	//check whether the log contains data, if yes, reject it(recovery is not implemented yet)
-	if info.Size() != 0 {
+	keydir, writeOffset, err := recoverLog(file, info.Size())
+
+	if err != nil {
 		_ = file.Close()
-		return nil, fmt.Errorf(
-			"%w: %s",
-			ErrRecoveryRequired,
-			logPath,
-		)
+		return nil, fmt.Errorf("recover database log: %w", err)
 	}
 
 	db := &DB{
 		dir:         dir,
 		logFile:     file,
-		keydir:      make(map[string]indexEntry),
-		writeOffset: 0,
+		keydir:      keydir,
+		writeOffset: writeOffset,
 		now:         time.Now,
 	}
 

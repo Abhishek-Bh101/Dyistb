@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,8 @@ var (
 	ErrRecoveryRequired = errors.New("non-empty log required recovery")
 
 	ErrAlreadyOpen = errors.New("database is already open")
+
+	ErrNotFound = errors.New("key not found")
 )
 
 // indexEntry describes the location of a record in the log
@@ -142,6 +145,7 @@ func (db *DB) Close() error {
 
 func (db *DB) Put(key, value []byte) error {
 
+	//exclusive lock
 	db.mu.Lock()
 
 	defer db.mu.Unlock()
@@ -161,6 +165,7 @@ func (db *DB) Put(key, value []byte) error {
 		value:     value,
 	}
 
+	//encode the record for writing
 	encoded, err := encodeRecord(rec)
 	if err != nil {
 		return fmt.Errorf("encode put record : %w", err)
@@ -168,6 +173,7 @@ func (db *DB) Put(key, value []byte) error {
 
 	offset := db.writeOffset
 
+	//write the bytes at the offset
 	n, err := db.logFile.WriteAt(encoded, offset)
 
 	if err == nil && n != len(encoded) {
@@ -184,11 +190,101 @@ func (db *DB) Put(key, value []byte) error {
 		return db.failed
 	}
 
+	//update keydir
 	db.keydir[string(key)] = indexEntry{
 		recordOffset: offset,
 		recordSize:   int64(len(encoded)),
 		timestamp:    rec.timestamp,
 	}
+
+	//move writeoffset forward
+	db.writeOffset += int64(len(encoded))
+
+	return nil
+}
+func (db *DB) Get(key []byte) ([]byte, error) {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.closed {
+		return nil, ErrClosed
+	}
+
+	if db.failed != nil {
+		return nil, fmt.Errorf("database is in failed state : %w", db.failed)
+	}
+
+	entry, ok := db.keydir[string(key)]
+
+	if !ok {
+		return nil, ErrNotFound
+	}
+
+	reader := io.NewSectionReader(db.logFile, entry.recordOffset, entry.recordSize)
+
+	rec, err := decodeRecord(reader, entry.recordSize)
+
+	if err != nil {
+		return nil, fmt.Errorf("read record: %w", err)
+	}
+
+	if record.encodedSize() != entry.recordSize {
+		return nil, fmt.Errorf("%w: indexed record mismatch", ErrCorrupt)
+	}
+
+	if rec.typ != recordTypePut || !bytes.Equal(rec.key, key) {
+		return nil, fmt.Errorf("%w: keydir points to an unexpected record", ErrCorrupt)
+	}
+
+	return rec.value, nil
+}
+
+// Delete appends the new delete record to the log and deletes the key from keydir
+func (db *DB) Delete(key []byte) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if db.closed {
+		return ErrClosed
+	}
+
+	if db.failed != nil {
+		return fmt.Errorf("database is in failed state: %w", db.failed)
+	}
+
+	rec := record{
+		timestamp: uint64(db.now().UnitMilli()),
+		typ:       recordTypeDelete,
+		key:       key,
+		value:     nil,
+	}
+
+	encoded, err := encodeRecord(rec)
+
+	if err != nil {
+		return fmt.Errorf("encode delete record: %w", err)
+	}
+
+	offset := db.writeOffset
+
+	n, err := db.logFile.WriteAt(encoded, offset)
+
+	if err == nil && n != len(encoded) {
+		err = io.ErrShortWrite
+	}
+
+	if err != nil {
+		db.failed = fmt.Errorf("append delete record: %w", err)
+		return db.failed
+	}
+
+	if err := db.logFile.Sync(); err != nil {
+		db.failed = fmt.Errorf("sync delete record: %w", err)
+		return db.failed
+	}
+
+	//delete the key from keydir
+	delete(db.keydir, string(key))
 
 	db.writeOffset += int64(len(encoded))
 

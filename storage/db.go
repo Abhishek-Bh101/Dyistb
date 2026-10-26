@@ -290,3 +290,54 @@ func (db *DB) Delete(key []byte) error {
 
 	return nil
 }
+
+func recoverLog(file *os.File, fileSize int64) (map[string]indexEntry, int64, error) {
+	keydir := make(map[string]indexEntry) //make an empty map
+
+	var offset int64
+
+	for offset < fileSize {
+
+		remaining := fileSize - offset
+		readfile := io.NewSectionReader(file, offset, remaining)
+
+		rec, err := decodeRecord(readfile, remaining)
+
+		if err != nil {
+			if !errors.Is(err, ErrTruncated) {
+				return nil, offset, fmt.Errorf("read record: %w", err)
+			}
+
+			if err := file.Truncate(offset); err != nil {
+				return nil, 0, fmt.Errorf("truncate incomplete record: %w", err)
+			}
+
+			if err := file.Sync(); err != nil {
+				return nil, 0, fmt.Errorf("sync recovered log: %w", err)
+			}
+			return keydir, offset, nil
+
+		}
+
+		recordSize := rec.encodedSize()
+		switch rec.typ {
+		case recordTypePut:
+			keydir[string(rec.key)] = indexEntry{
+				recordOffset: offset,
+				recordSize:   recordSize,
+				timestamp:    rec.timestamp,
+			}
+
+		case recordTypeDelete:
+			delete(keydir, string(rec.key))
+
+		default:
+			return nil, 0, fmt.Errorf("%w: unknown record type at offset %d", ErrCorrupt, offset)
+		}
+
+		offset += recordSize
+	}
+
+	return keydir, offset, nil
+
+}

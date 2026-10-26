@@ -225,7 +225,7 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 		return nil, fmt.Errorf("read record: %w", err)
 	}
 
-	if record.encodedSize() != entry.recordSize {
+	if rec.encodedSize() != entry.recordSize {
 		return nil, fmt.Errorf("%w: indexed record mismatch", ErrCorrupt)
 	}
 
@@ -250,7 +250,7 @@ func (db *DB) Delete(key []byte) error {
 	}
 
 	rec := record{
-		timestamp: uint64(db.now().UnitMilli()),
+		timestamp: uint64(db.now().UnixMilli()),
 		typ:       recordTypeDelete,
 		key:       key,
 		value:     nil,
